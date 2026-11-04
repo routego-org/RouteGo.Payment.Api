@@ -1,0 +1,120 @@
+# LOCAL DEVELOPMENT ONLY — nothing here touches a real AWS account.
+#   docker compose up -d                       # Postgres + migrations + LocalStack + MockGateway + Payment
+#   docker compose up -d postgres migrate localstack mock-gateway   # dependencies only, then: dotnet run --project RouteGo.Payment.Api
+#
+# The EC2 deployment uses deploy/ec2/ on routego-secure, not this file.
+#
+# Try it:
+#   curl -H "X-Internal-Key: local-internal-key" -H "Content-Type: application/json" \
+#        -d '{"bookingId":"7b0e3a54-1c11-4a52-9a3e-5d5a0a1f2b77","amount":1600,"currency":"INR","customerEmail":"priya@example.com"}' \
+#        http://localhost:5006/internal/payments
+#   then open the checkoutUrl, click Success, and read the event:
+#   docker compose exec localstack awslocal sqs receive-message --queue-url http://localhost:4566/000000000000/booking-payment-q
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: routego_payment
+      POSTGRES_USER: payment_user
+      POSTGRES_PASSWORD: payment_local   # local-only throwaway password
+    ports:
+      - "5433:5432"   # not 5432: the other RouteGo services publish that one
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payment_user -d routego_payment"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Applies migrations/ once Postgres is up, then exits. Re-run any time: docker compose run --rm migrate
+  migrate:
+    image: postgres:17
+    command: ["bash", "/local/apply-migrations.sh"]
+    environment:
+      PGHOST: postgres
+      PGDATABASE: routego_payment
+      PGUSER: payment_user
+      PGPASSWORD: payment_local
+    volumes:
+      - ./migrations:/migrations:ro
+      - ./local/apply-migrations.sh:/local/apply-migrations.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  localstack:
+    image: localstack/localstack:4.4
+    environment:
+      SERVICES: sqs,sns,secretsmanager
+      AWS_DEFAULT_REGION: ap-south-1
+    ports:
+      - "${LOCALSTACK_PORT:-4566}:4566"   # set LOCALSTACK_PORT when another stack already holds 4566
+    volumes:
+      # Runs once LocalStack is ready: creates the topics, the queues + DLQs and the subscriptions.
+      - ./local/localstack/init-aws.sh:/etc/localstack/init/ready.d/init-aws.sh:ro
+    healthcheck:
+      # Healthy only after the init script has created the last queue.
+      test: ["CMD-SHELL", "awslocal sqs get-queue-url --queue-name audit-q >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  mock-gateway:
+    build:
+      context: .
+      dockerfile: tools/MockGateway/Dockerfile
+    image: routego/mock-gateway:local
+    ports:
+      - "5099:8080"
+    environment:
+      GatewayApiKey: local-gateway-key
+      PublicBaseUrl: http://localhost:5099
+      # Shortcut until the Webhook Receiver exists: results go straight onto Payment's queue.
+      AwsServiceUrl: http://localstack:4566
+      WebhookQueueUrl: http://localstack:4566/000000000000/payment-webhooks-q
+      AWS_REGION: ap-south-1
+      # To use the receiver instead: WebhookUrl: http://host.docker.internal:3000/webhooks/payment
+    depends_on:
+      localstack:
+        condition: service_healthy
+
+  payment:
+    build: .
+    image: routego/payment:local
+    ports:
+      - "5006:8080"
+    environment:
+      # Development: SecretResolver reads secrets from configuration (these env vars), never AWS.
+      ASPNETCORE_ENVIRONMENT: Development
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      # Inside the compose network the other services are not on localhost.
+      AwsServiceUrl: http://localstack:4566
+      GatewayBaseUrl: http://mock-gateway:8080/
+      ReturnUrlTemplate: http://localhost:8080/bookings/{bookingId}/payment-return
+      PaymentEventsTopicArn: arn:aws:sns:ap-south-1:000000000000:routego-payment-events
+      AuditEventsTopicArn: arn:aws:sns:ap-south-1:000000000000:routego-audit-events
+      WebhookQueueUrl: http://localstack:4566/000000000000/payment-webhooks-q
+      WebhookDeadLetterQueueUrl: http://localstack:4566/000000000000/payment-webhooks-dlq
+      RefundQueueUrl: http://localstack:4566/000000000000/payment-refund-q
+      RefundDeadLetterQueueUrl: http://localstack:4566/000000000000/payment-refund-dlq
+      DB_CONNECTION_PROFILE: ManagedInstances
+      DB_MAX_POOL_SIZE: "10"
+      # The database secret, under its fixed name (Infrastructure/Pgsql/DbSecret.cs), in the platform JSON shape.
+      database/postgresql/routego-payment-api: '{"host":"postgres","port":5432,"database":"routego_payment","username":"payment_user","password":"payment_local","sslmode":"disable"}'
+      # The gateway secret (Infrastructure/Gateway/GatewaySecret.cs). Local-only throwaway values.
+      routego/payment/gateway: '{"apiKey":"local-gateway-key","webhookSecret":"local-webhook-secret"}'
+      # The internal key Booking presents in X-Internal-Key. Local-only throwaway value.
+      routego/internal-key: local-internal-key
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      localstack:
+        condition: service_healthy
+      mock-gateway:
+        condition: service_started
+
+volumes:
+  postgres-data:

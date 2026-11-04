@@ -1,0 +1,76 @@
+# EC2 deployment of the Payment API (routego-secure). Started by start.sh, which reads the database
+# connection from Secrets Manager first — there is no .env file for this service.
+# Real AWS is used here: Secrets Manager, SQS and SNS through the EC2 instance role (routego-secure-role).
+#
+# Payment is internal only: Booking calls it on port 5006 (sg-secure admits sg-core and sg-edge only),
+# and Nginx never routes to it. The gateway's webhook reaches it through the Webhook Receiver and the
+# payment-webhooks-q queue, not through this port.
+name: routego-payment
+services:
+  # One-shot helper: applies the SQL migrations, then exits. It is not a long-running container.
+  migrate:
+    image: postgres:17
+    command: ["bash", "/deploy/apply-migrations.sh"]
+    environment:
+      PGHOST: ${PAYMENT_DB_HOST:?run start.sh, which reads it from Secrets Manager}
+      PGPORT: ${PAYMENT_DB_PORT:?run start.sh}
+      PGDATABASE: ${PAYMENT_DB_NAME:?run start.sh}
+      PGUSER: ${PAYMENT_DB_USER:?run start.sh}
+      PGPASSWORD: ${PAYMENT_DB_PASSWORD:?run start.sh}
+      PGSSLMODE: ${PAYMENT_DB_SSLMODE:-require}
+    volumes:
+      - ../../migrations:/migrations:ro
+      - ./apply-migrations.sh:/deploy/apply-migrations.sh:ro
+
+  payment:
+    image: routego/payment:latest
+    restart: unless-stopped
+    ports:
+      - "5006:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      AWS_REGION: ap-south-1
+      # An always-on process serving concurrent requests; 10 connections is plenty on one small server.
+      DB_CONNECTION_PROFILE: ManagedInstances
+      DB_MAX_POOL_SIZE: "10"
+      # The gateway: MockGateway on routego-edge, reached on the edge instance's private address.
+      GatewayBaseUrl: ${GATEWAY_BASE_URL:?run start.sh with GATEWAY_BASE_URL, e.g. http://10.0.1.10:8081/}
+      # The Web Portal page the customer returns to; the portal must serve it (spec ADR 0009).
+      ReturnUrlTemplate: ${RETURN_URL_TEMPLATE:?run start.sh with RETURN_URL_TEMPLATE}
+      PaymentEventsTopicArn: arn:aws:sns:ap-south-1:${AWS_ACCOUNT_ID:?run start.sh}:routego-payment-events
+      AuditEventsTopicArn: arn:aws:sns:ap-south-1:${AWS_ACCOUNT_ID}:routego-audit-events
+      WebhookQueueUrl: https://sqs.ap-south-1.amazonaws.com/${AWS_ACCOUNT_ID}/payment-webhooks-q
+      WebhookDeadLetterQueueUrl: https://sqs.ap-south-1.amazonaws.com/${AWS_ACCOUNT_ID}/payment-webhooks-dlq
+      RefundQueueUrl: https://sqs.ap-south-1.amazonaws.com/${AWS_ACCOUNT_ID}/payment-refund-q
+      RefundDeadLetterQueueUrl: https://sqs.ap-south-1.amazonaws.com/${AWS_ACCOUNT_ID}/payment-refund-dlq
+      # Workstation GC: a server-GC heap per core is too much on a small instance.
+      DOTNET_gcServer: "0"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # The classroom gateway (no spec; not part of the product). One-server layout: it runs beside Payment
+  # and nginx in front of the portal routes /pay/ to it, so the customer's pay page shares the site's
+  # address. Only /pay/ is routed; its /api/ and /admin/ paths stay on the private network.
+  mock-gateway:
+    image: routego/mock-gateway:latest
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      AWS_REGION: ap-south-1
+      GatewayApiKey: ${GATEWAY_API_KEY:?run start.sh, which reads it from the gateway secret}
+      PublicBaseUrl: ${PUBLIC_BASE_URL:?run start.sh}
+      # Until the Webhook Receiver Lambda is deployed, results go straight to Payment's queue.
+      WebhookQueueUrl: https://sqs.ap-south-1.amazonaws.com/${AWS_ACCOUNT_ID}/payment-webhooks-q
+      DOTNET_gcServer: "0"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+networks:
+  default:
+    name: ec2_default
+    external: true

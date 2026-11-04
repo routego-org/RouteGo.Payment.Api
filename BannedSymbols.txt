@@ -1,0 +1,30 @@
+# RouteGo C# Coding Standards — banned APIs (enforced as RS0030 build errors by
+# Microsoft.CodeAnalysis.BannedApiAnalyzers). Rule IDs refer to csharp-standards.md.
+
+# H1 — never construct HttpClient directly; use a typed client via AddHttpClient<T>.
+# The ONLY sanctioned suppression is the H10 isolated session client (targeted pragma + why-comment).
+M:System.Net.Http.HttpClient.#ctor; H1: inject a typed client registered with AddHttpClient<T>
+M:System.Net.Http.HttpClient.#ctor(System.Net.Http.HttpMessageHandler); H1: inject a typed client registered with AddHttpClient<T>
+M:System.Net.Http.HttpClient.#ctor(System.Net.Http.HttpMessageHandler,System.Boolean); H1: inject a typed client registered with AddHttpClient<T>
+
+# H2 — the unnamed CreateClient() returns an unconfigured client: no base address, no resilience, no handlers
+M:System.Net.Http.HttpClientFactoryExtensions.CreateClient(System.Net.Http.IHttpClientFactory); H2: resolve a typed client instead
+
+# H5 — EnsureSuccessStatusCode throws away the response body; handle status codes explicitly
+M:System.Net.Http.HttpResponseMessage.EnsureSuccessStatusCode; H5: map expected codes to outcomes, throw with body snippet for unexpected ones
+
+# D6 — never block on async code
+M:System.Threading.Tasks.Task.Wait; D6: await instead of blocking
+M:System.Threading.Tasks.Task.Wait(System.Int32); D6: await instead of blocking
+M:System.Threading.Tasks.Task.Wait(System.Threading.CancellationToken); D6: await instead of blocking
+P:System.Threading.Tasks.Task`1.Result; D6: await instead of blocking
+
+# K5 — time comes from IClock so tests can control it
+P:System.DateTime.Now; K5: inject IClock
+P:System.DateTime.UtcNow; K5: inject IClock
+P:System.DateTimeOffset.Now; K5: inject IClock
+P:System.DateTimeOffset.UtcNow; K5: inject IClock
+
+# F22 — no reflection-based construction in business code
+M:System.Activator.CreateInstance(System.Type); F22: construct the type explicitly
+T:System.Reflection.Emit.DynamicMethod; F22: no runtime code generation

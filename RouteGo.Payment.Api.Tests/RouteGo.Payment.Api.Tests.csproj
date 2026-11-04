@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RouteGo.Payment.Api\RouteGo.Payment.Api.csproj" />
+    <!-- link the co-located slice tests back in (references/test-compilation.md) -->
+    <Compile Include="..\RouteGo.Payment.Api\Features\**\*.Tests.cs" LinkBase="Features" />
+    <Compile Include="..\RouteGo.Payment.Api\Infrastructure\**\*.Tests.cs" LinkBase="Infrastructure" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Configuration.UserSecrets" Version="10.0.14" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="*" />
+    <PackageReference Include="Testcontainers.PostgreSql" Version="4.16.0" />
+    <PackageReference Include="xunit" Version="*" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="*" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="*" />
+    <PackageReference Include="NetArchTest.Rules" Version="*" />
+  </ItemGroup>
+
+</Project>
