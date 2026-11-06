@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-gateway
+  labels: { app.kubernetes.io/name: mock-gateway, app.kubernetes.io/part-of: routego }
+  annotations:
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+spec:
+  type: ClusterIP
+  selector: { app.kubernetes.io/name: mock-gateway }
+  ports:
+    - { name: http, port: 80, targetPort: http }   # other services call http://mock-gateway/

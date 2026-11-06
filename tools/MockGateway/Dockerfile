@@ -6,7 +6,8 @@ WORKDIR /src
 
 # The root build files make the coding standard apply to this tool as it does to the service.
 COPY Directory.Build.props .editorconfig BannedSymbols.txt ./
-COPY docs/coding-standards/enforcement/ docs/coding-standards/enforcement/
+# (Removed: COPY docs/coding-standards/enforcement/ — that submodule is not in this repo, so the line broke
+#  every build. Directory.Build.props only references it when it exists.)
 
 COPY tools/MockGateway/MockGateway.csproj tools/MockGateway/
 RUN dotnet restore tools/MockGateway/MockGateway.csproj -r linux-x64

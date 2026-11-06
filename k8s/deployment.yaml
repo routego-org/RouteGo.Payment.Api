@@ -1,0 +1,84 @@
+# Payment — payment intents, gateway webhooks, refunds (internal only)
+# Source: RouteGo.Payment.Api   Image: routego/payment   ServiceAccount -> IAM role routego-payment-pod-role (EKS Pod Identity)
+# Settings that differ per AWS account come from ConfigMap routego-environment (RouteGo.Infra/k8s/platform/environment.yaml);
+# $(VAR) expands an env var defined above it. Secrets (DB login, internal key) are read by the app from Secrets Manager.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment
+  labels: { app.kubernetes.io/name: payment, app.kubernetes.io/part-of: routego }
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels: { app.kubernetes.io/name: payment }
+  strategy:
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: payment, app.kubernetes.io/part-of: routego }
+    spec:
+      serviceAccountName: payment
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1654              # the 'app' user of the mcr.microsoft.com/dotnet/aspnet image
+        runAsGroup: 1654
+        fsGroup: 1654
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: payment
+          image: routego/payment      # rewritten to the ECR URL + tag by k8s/kustomization.yaml
+          ports:
+            - { name: http, containerPort: 8080 }
+          env:
+            - name: AWS_REGION
+              valueFrom:
+                configMapKeyRef: { name: routego-environment, key: AWS_REGION }
+            - name: AWS_ACCOUNT_ID
+              valueFrom:
+                configMapKeyRef: { name: routego-environment, key: AWS_ACCOUNT_ID }
+            - name: PUBLIC_URL
+              valueFrom:
+                configMapKeyRef: { name: routego-environment, key: PUBLIC_URL }
+            - name: ASPNETCORE_ENVIRONMENT
+              value: "Production"
+            - name: DOTNET_gcServer          # workstation GC: less memory per pod
+              value: "0"
+            - name: DB_CONNECTION_PROFILE
+              value: "ManagedInstances"
+            - name: DB_MAX_POOL_SIZE
+              value: "10"
+            - name: PaymentEventsTopicArn
+              value: "arn:aws:sns:$(AWS_REGION):$(AWS_ACCOUNT_ID):routego-payment-events"
+            - name: AuditEventsTopicArn
+              value: "arn:aws:sns:$(AWS_REGION):$(AWS_ACCOUNT_ID):routego-audit-events"
+            - name: WebhookQueueUrl
+              value: "https://sqs.$(AWS_REGION).amazonaws.com/$(AWS_ACCOUNT_ID)/payment-webhooks-q"
+            - name: WebhookDeadLetterQueueUrl
+              value: "https://sqs.$(AWS_REGION).amazonaws.com/$(AWS_ACCOUNT_ID)/payment-webhooks-dlq"
+            - name: RefundQueueUrl
+              value: "https://sqs.$(AWS_REGION).amazonaws.com/$(AWS_ACCOUNT_ID)/payment-refund-q"
+            - name: RefundDeadLetterQueueUrl
+              value: "https://sqs.$(AWS_REGION).amazonaws.com/$(AWS_ACCOUNT_ID)/payment-refund-dlq"
+            - name: GatewayBaseUrl
+              value: "http://mock-gateway/"
+            - name: ReturnUrlTemplate
+              value: "$(PUBLIC_URL)/bookings/{bookingId}/payment-return"
+          resources:
+            requests: { cpu: 50m, memory: 192Mi }
+            limits: { memory: 384Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          startupProbe:              # .NET cold start + first AWS calls; up to 2 minutes
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:            # database + dependencies
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 10
+            failureThreshold: 3

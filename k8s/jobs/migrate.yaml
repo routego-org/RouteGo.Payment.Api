@@ -1,0 +1,65 @@
+# Applies migrations/ to the payment database. Run by the CI/CD pipeline BEFORE each deploy
+# (not part of kustomization.yaml, so `kubectl apply -k k8s` never runs it by accident).
+#
+# How it gets the database password without the pipeline ever seeing it:
+#   it runs as ServiceAccount "payment" -> IAM role routego-payment-pod-role (Pod Identity), which may read
+#   only this service's secret. The init container fetches the secret; the main container runs psql.
+# The migration files come from ConfigMap payment-migrations, which the pipeline creates from migrations/.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: payment-migrate
+  labels: { app.kubernetes.io/name: payment-migrate, app.kubernetes.io/part-of: routego }
+spec:
+  backoffLimit: 0                    # a failed migration must stop the deploy, not retry blindly
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: payment-migrate, app.kubernetes.io/part-of: routego }
+    spec:
+      restartPolicy: Never
+      serviceAccountName: payment
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        - name: fetch-db-login
+          image: public.ecr.aws/aws-cli/aws-cli:2.22.0
+          command: ["sh", "-c"]
+          args:
+            - aws secretsmanager get-secret-value --secret-id "$DB_SECRET" --query SecretString --output text > /work/db.json
+          env:
+            - { name: DB_SECRET, value: "database/postgresql/routego-payment-api" }
+            - { name: HOME, value: /tmp }
+          volumeMounts:
+            - { name: work, mountPath: /work }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+      containers:
+        - name: migrate
+          image: postgres:17
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              # db.json is the flat JSON Terraform wrote: {"database":..,"host":..,"password":..,"port":5432,..}
+              j() { sed -n "s/.*\"$1\" *: *\"\{0,1\}\([^\",}]*\).*/\1/p" /work/db.json; }
+              export PGHOST="$(j host)" PGPORT="$(j port)" PGDATABASE="$(j database)"
+              export PGUSER="$(j username)" PGPASSWORD="$(j password)" PGSSLMODE=require
+              echo "migrating $PGDATABASE on $PGHOST as $PGUSER"
+              MIGRATIONS_DIR=/migrations bash /migrations/apply-migrations.sh
+          volumeMounts:
+            - { name: work, mountPath: /work, readOnly: true }
+            - { name: migrations, mountPath: /migrations, readOnly: true }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: work
+          emptyDir: { medium: Memory }   # the password never touches a disk
+        - name: migrations
+          configMap: { name: payment-migrations }
